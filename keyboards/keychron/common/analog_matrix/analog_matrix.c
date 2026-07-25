@@ -271,22 +271,85 @@ void analog_matrix_eeprom_update(const void *buf, void *addr, size_t len) {
     eeprom_update_block(buf, addr, len);
 }
 
+enum {
+    AUTO_CAL_EEPROM_EXTERNAL_MARKER = 0,
+    AUTO_CAL_EEPROM_EXTERNAL_RECORD,
+    AUTO_CAL_EEPROM_EMULATED_KB_VERSION,
+    AUTO_CAL_EEPROM_EMULATED_MARKER,
+    AUTO_CAL_EEPROM_EMULATED_RECORD,
+};
+
+__attribute__((weak)) void analog_matrix_auto_calibration_eeprom_write_user(
+    uint8_t row,
+    uint8_t col,
+    uint16_t zero_travel,
+    uint16_t full_travel,
+    uint8_t target,
+    uintptr_t address,
+    const void *data,
+    size_t length
+) {
+    (void)row;
+    (void)col;
+    (void)zero_travel;
+    (void)full_travel;
+    (void)target;
+    (void)address;
+    (void)data;
+    (void)length;
+}
+
 static void save_calibration_value(uint8_t row, uint8_t col) {
     static uint8_t eeprom_calibrated;
+    calibrated_value_t *value = &saved_calib_values[row][col];
 
     if (eeprom_calibrated != calibrated) {
         eeprom_calibrated = calibrated;
         he_eeprom_write_block(&calibrated, (void *)(EXTERNAL_EEPROM_OFFSET + OFFSET_CALIBRATION), 1);
+        analog_matrix_auto_calibration_eeprom_write_user(
+            row, col, value->zero_travel, value->full_travel,
+            AUTO_CAL_EEPROM_EXTERNAL_MARKER,
+            EXTERNAL_EEPROM_OFFSET + OFFSET_CALIBRATION,
+            &calibrated, sizeof(calibrated)
+        );
     }
 
-    uint32_t offset = OFFSET_CALIBRATED_DATA_START + (&saved_calib_values[row][col]-&saved_calib_values[0][0])* sizeof(saved_calib_values[0][0]);
-    he_eeprom_write_block(&saved_calib_values[row][col], (void *)(EXTERNAL_EEPROM_OFFSET + offset), sizeof(saved_calib_values[0][0]));
+    uint32_t offset = OFFSET_CALIBRATED_DATA_START + (value - &saved_calib_values[0][0]) * sizeof(*value);
+    he_eeprom_write_block(value, (void *)(EXTERNAL_EEPROM_OFFSET + offset), sizeof(*value));
+    analog_matrix_auto_calibration_eeprom_write_user(
+        row, col, value->zero_travel, value->full_travel,
+        AUTO_CAL_EEPROM_EXTERNAL_RECORD,
+        EXTERNAL_EEPROM_OFFSET + offset,
+        value, sizeof(*value)
+    );
 
     // Save a copy to emulated EEPROM
-    if (!eeconfig_is_kb_datablock_valid()) eeprom_update_dword(EECONFIG_KEYBOARD, (EECONFIG_KB_DATA_VERSION));
+    if (!eeconfig_is_kb_datablock_valid()) {
+        const uint32_t kb_data_version = EECONFIG_KB_DATA_VERSION;
+        eeprom_update_dword(EECONFIG_KEYBOARD, kb_data_version);
+        analog_matrix_auto_calibration_eeprom_write_user(
+            row, col, value->zero_travel, value->full_travel,
+            AUTO_CAL_EEPROM_EMULATED_KB_VERSION,
+            (uintptr_t)EECONFIG_KEYBOARD,
+            &kb_data_version, sizeof(kb_data_version)
+        );
+    }
 
     analog_matrix_eeprom_update(&calibrated, (void *)OFFSET_CALIBRATION, 1);
-    analog_matrix_eeprom_update(&saved_calib_values[row][col], (void *)offset, sizeof(saved_calib_values[0][0]));
+    analog_matrix_auto_calibration_eeprom_write_user(
+        row, col, value->zero_travel, value->full_travel,
+        AUTO_CAL_EEPROM_EMULATED_MARKER,
+        EECONFIG_BASE_ANALOG_MATRIX + OFFSET_CALIBRATION,
+        &calibrated, sizeof(calibrated)
+    );
+
+    analog_matrix_eeprom_update(value, (void *)offset, sizeof(*value));
+    analog_matrix_auto_calibration_eeprom_write_user(
+        row, col, value->zero_travel, value->full_travel,
+        AUTO_CAL_EEPROM_EMULATED_RECORD,
+        EECONFIG_BASE_ANALOG_MATRIX + offset,
+        value, sizeof(*value)
+    );
 }
 
 static void save_calibration_values(void) {
